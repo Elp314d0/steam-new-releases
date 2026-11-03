@@ -1,0 +1,40 @@
+name: Steam new releases
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (UTC); GitHub may delay it a few minutes
+  workflow_dispatch:          # "Run workflow" button for manual runs
+
+permissions:
+  contents: write             # needed to commit seen.json back
+
+concurrency:
+  group: steam-watch          # never run two checks at the same time
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Steam and notify Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python steam_watch.py
+
+      - name: Save seen games
+        run: |
+          if [ -n "$(git status --porcelain seen.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add seen.json
+            git commit -m "chore: update seen games"
+            git push
+          fi
