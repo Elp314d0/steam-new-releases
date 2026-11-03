@@ -1,6 +1,6 @@
 """Watch Steam's newest demos and free-to-play games and send each new one to Telegram.
 
-Runs on GitHub Actions every 3 hours. The ids already seen live in seen.json
+Runs on GitHub Actions every 30 minutes. The ids already seen live in seen.json
 (one list per source), which the workflow commits back to the repo after each run.
 """
 
