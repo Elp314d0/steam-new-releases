@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/30 * * * *"   # every 30 minutes (UTC); GitHub may delay it a few minutes
   workflow_dispatch:          # "Run workflow" button for manual runs
+    inputs:
+      send_latest:
+        description: "Test: send the newest game now"
+        type: boolean
+        default: false
 
 permissions:
   contents: write             # needed to commit seen.json back
@@ -27,6 +32,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND_LATEST: ${{ inputs.send_latest }}
         run: python steam_watch.py
 
       - name: Save seen games
