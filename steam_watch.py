@@ -1,7 +1,7 @@
-"""Watch Steam's newest demos and send each one that just appeared to Telegram.
+"""Watch Steam's newest demos and free-to-play games and send each new one to Telegram.
 
-Runs on GitHub Actions every 3 hours. The list of games already seen lives in
-seen.json, which the workflow commits back to the repo after each run.
+Runs on GitHub Actions every 3 hours. The ids already seen live in seen.json
+(one list per source), which the workflow commits back to the repo after each run.
 """
 
 import html
@@ -13,20 +13,41 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
-# Same filters as the page:
-# https://store.steampowered.com/search/?sort_by=Released_DESC&hwtype=0&category1=10&supportedlang=english
-# The /search/results/ endpoint returns those results as JSON (the HTML rows inside).
+# Base of the store search, newest first, English supported. The /search/results/
+# endpoint returns the same rows as the page, as JSON (the HTML rows inside).
 SEARCH_URL = (
     "https://store.steampowered.com/search/results/"
     "?query&start={start}&count=50&sort_by=Released_DESC&hwtype=0"
-    "&category1=10&supportedlang=english&infinite=1&cc=us&l=english"
+    "&supportedlang=english&infinite=1&cc=us&l=english&{filters}"
 )
 TAGS_URL = "https://store.steampowered.com/tagdata/populartags/english"
 DETAILS_URL = "https://store.steampowered.com/api/appdetails?appids={appid}&filters=basic"
-PAGES = 2  # 2 x 50 = the 100 newest items; Steam gets ~50-70 demos a day, ~8 per 3 hours
+
+# What to watch. "filters" are extra search params; a source with several searches
+# merges them so nothing slips through. "type" is what Steam's store API must report.
+SOURCES = [
+    {
+        "key": "demo",
+        "label": "DEMO",
+        "type": "demo",
+        "filters": ["category1=10"],                    # the Demos section
+    },
+    {
+        "key": "f2p",
+        "label": "FREE TO PLAY",
+        "type": "game",
+        "filters": [
+            "category1=998&tags=113",                   # games tagged Free to Play
+            "category1=998&maxprice=free",              # games that cost $0
+        ],
+    },
+]
+
+PAGES = 2  # 2 x 50 = the 100 newest per search; Steam gets ~50-70 demos and ~15 free games a day
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen.json")
-MAX_SEEN = 3000  # keep the state file small; old items never come back to the top
+MAX_SEEN = 3000  # per source; keep the state file small, old items never come back to the top
 MAX_TAGS = 7  # the search row carries the top tags, same ones the store shows
 
 ROW_RE = re.compile(r'<a href="([^"]+)"[^>]*data-ds-itemkey="([^"]+)"(.*?)</a>', re.S)
@@ -57,12 +78,19 @@ def fetch_tag_names():
         return {}
 
 
-def fetch_games():
-    """Return the newest items as dicts, newest first."""
-    tag_names = fetch_tag_names()
+def release_date(game):
+    """Sort key for merged searches; unknown formats ("Coming soon") go last."""
+    try:
+        return datetime.strptime(game["date"], "%b %d, %Y")
+    except ValueError:
+        return datetime.min
+
+
+def fetch_search(filters, tag_names):
+    """Return the newest items of one search as dicts, newest first."""
     games = []
     for page in range(PAGES):
-        results = get_json(SEARCH_URL.format(start=page * 50))["results_html"]
+        results = get_json(SEARCH_URL.format(start=page * 50, filters=filters))["results_html"]
         # The tag ids live inside the <a ...> opening tag, so search the whole row.
         for row in re.finditer(ROW_RE, results):
             url, key, body = row.groups()
@@ -83,8 +111,20 @@ def fetch_games():
     if not games:
         # Empty result usually means Steam changed its HTML; fail loudly instead of
         # silently saving an empty state.
-        sys.exit("No games parsed from Steam - the page format may have changed.")
+        sys.exit(f"No games parsed from Steam ({filters}) - the page format may have changed.")
     return games
+
+
+def fetch_source(source, tag_names):
+    """Run every search of a source and merge them without duplicates, newest first."""
+    merged, ids = [], set()
+    for filters in source["filters"]:
+        for game in fetch_search(filters, tag_names):
+            if game["id"] not in ids:
+                ids.add(game["id"])
+                merged.append(game)
+    # sorted() is stable, so games from the same day keep Steam's own order.
+    return sorted(merged, key=release_date, reverse=True)
 
 
 def fetch_details(game):
@@ -106,18 +146,21 @@ def fetch_details(game):
 
 def load_seen():
     if not os.path.exists(STATE_FILE):
-        return None
+        return {}
     with open(STATE_FILE) as f:
-        return json.load(f)
+        state = json.load(f)
+    # Older versions stored a single list, and only watched demos.
+    return {"demo": state} if isinstance(state, list) else state
 
 
-def save_seen(ids):
+def save_seen(state):
     with open(STATE_FILE, "w") as f:
-        json.dump(ids[:MAX_SEEN], f, indent=0)
+        json.dump({k: v[:MAX_SEEN] for k, v in state.items()}, f, indent=0)
 
 
-def build_caption(game):
+def build_caption(game, label):
     lines = [
+        f"<b>[{label}]</b>",
         f"<b>{html.escape(game['title'])}</b>",
         f"{html.escape(game['date'])} · {html.escape(game['price'])}",
     ]
@@ -140,58 +183,83 @@ def telegram(method, params):
         return False
 
 
-def send_game(game, photo, dry_run):
-    caption = build_caption(game)
+def send_text(text, dry_run):
+    if dry_run:
+        print(text + "\n")
+    elif not telegram("sendMessage", {"text": text}):
+        sys.exit("Telegram rejected the message.")
+
+
+def send_game(game, label, photo, dry_run):
+    caption = build_caption(game, label)
     if dry_run:
         print(photo)
         print(caption + "\n")
         return
     # If Telegram can't fetch the picture, still send the info as plain text.
     if not (photo and telegram("sendPhoto", {"photo": photo, "caption": caption})):
-        if not telegram("sendMessage", {"text": caption}):
-            sys.exit("Telegram rejected the message.")
+        send_text(caption, dry_run)
     time.sleep(1)  # stay well under Telegram's per-chat rate limit
+
+
+def send_if_right_type(game, source, dry_run):
+    """Send the game if Steam confirms its type. Returns True when it was sent."""
+    kind, photo = fetch_details(game)
+    # If Steam didn't say what it is, send it anyway rather than lose it.
+    if kind and kind != source["type"]:
+        print(f"Skipping {game['title']} ({kind}, expected {source['type']})")
+        return False
+    send_game(game, source["label"], photo, dry_run)
+    return True
 
 
 def main():
     dry_run = os.environ.get("DRY_RUN") == "1"
-    games = fetch_games()
+    # Manual test from the "Run workflow" button: send the newest N of each source,
+    # without touching seen.json.
+    test_count = int(os.environ.get("SEND_LATEST") or 0)
+    tag_names = fetch_tag_names()
+    state = load_seen()
 
-    # Manual test from the "Run workflow" button: send the newest game, touch nothing.
-    if os.environ.get("SEND_LATEST") == "true":
-        send_game(games[0], fetch_details(games[0])[1], dry_run)
-        return
+    for source in SOURCES:
+        games = fetch_source(source, tag_names)
 
-    seen = load_seen()
-    if seen is None:
-        # First run: everything on the page is "old". Remember it and send a test
-        # message so we know the bot setup works.
-        print(f"First run: storing {len(games)} games as already seen.")
-        text = (f"Steam watcher is running ({len(games)} games tracked). "
-                "You'll get a message every time a new game shows up.")
-        if dry_run:
-            print(text)
-        else:
-            telegram("sendMessage", {"text": text})
-        save_seen([g["id"] for g in games])
-        return
-
-    seen_set = set(seen)
-    new_games = [g for g in games if g["id"] not in seen_set]
-    print(f"{len(games)} games checked, {len(new_games)} new.")
-
-    # Oldest first, so the newest ends up at the bottom of the chat.
-    for game in reversed(new_games):
-        kind, photo = fetch_details(game)
-        # Only demos. If Steam didn't say what it is, send it anyway rather than lose it.
-        if kind and kind != "demo":
-            print(f"Skipping {game['title']} ({kind})")
+        if test_count:
+            picked = []
+            for game in games[:test_count * 2]:          # room for a few skipped items
+                kind, photo = fetch_details(game)
+                if not kind or kind == source["type"]:
+                    picked.append((game, photo))
+                if len(picked) == test_count:
+                    break
+            # Oldest first, so the newest ends up at the bottom of the chat.
+            for game, photo in reversed(picked):
+                send_game(game, source["label"], photo, dry_run)
+            print(f"Test: sent {len(picked)} {source['label']}.")
             continue
-        send_game(game, photo, dry_run)
 
-    if new_games:
-        # Save only after the messages went out, so a Telegram failure retries next run.
-        save_seen([g["id"] for g in new_games] + seen)
+        seen = state.get(source["key"])
+        if seen is None:
+            # First run for this source: everything on the page is "old". Remember it
+            # and say so, so we know it's being watched.
+            print(f"First run for {source['label']}: storing {len(games)} as already seen.")
+            send_text(f"Now watching new {source['label']} releases ({len(games)} tracked).", dry_run)
+            state[source["key"]] = [g["id"] for g in games]
+            save_seen(state)
+            continue
+
+        seen_set = set(seen)
+        new_games = [g for g in games if g["id"] not in seen_set]
+        print(f"{source['label']}: {len(games)} checked, {len(new_games)} new.")
+
+        # Oldest first, so the newest ends up at the bottom of the chat.
+        for game in reversed(new_games):
+            send_if_right_type(game, source, dry_run)
+
+        if new_games:
+            # Save only after the messages went out, so a Telegram failure retries next run.
+            state[source["key"]] = [g["id"] for g in new_games] + seen
+            save_seen(state)
 
 
 if __name__ == "__main__":

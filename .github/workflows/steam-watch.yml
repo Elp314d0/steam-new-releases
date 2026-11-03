@@ -6,9 +6,9 @@ on:
   workflow_dispatch:          # "Run workflow" button for manual runs
     inputs:
       send_latest:
-        description: "Test: send the newest game now"
-        type: boolean
-        default: false
+        description: "Test: send the newest N of each type now (0 = normal check)"
+        type: number
+        default: 10
 
 permissions:
   contents: write             # needed to commit seen.json back
