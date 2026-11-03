@@ -10,7 +10,7 @@ on:
       send_latest:
         description: "Test: send the newest N of each type now (0 = normal check)"
         type: number
-        default: 10
+        default: 0                # external triggers (cron-job.org) must do a normal check
 
 permissions:
   contents: write             # needed to commit seen.json back
@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main               # latest seen.json, even if another run just pushed it
 
       - uses: actions/setup-python@v5
         with:
