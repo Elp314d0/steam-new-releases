@@ -2,7 +2,9 @@ name: Steam new releases
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes (UTC); GitHub may delay it a few minutes
+    # Every 30 minutes, at :07 and :37. GitHub's scheduler is overloaded at :00 and :30
+    # and often delays or drops those runs, so avoid the round minutes.
+    - cron: "7,37 * * * *"
   workflow_dispatch:          # "Run workflow" button for manual runs
     inputs:
       send_latest:
