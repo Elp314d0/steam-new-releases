@@ -1,6 +1,6 @@
-"""Watch Steam's "newest releases" search and send each game that just appeared to Telegram.
+"""Watch Steam's newest demos and send each one that just appeared to Telegram.
 
-Runs on GitHub Actions every 30 minutes. The list of games already seen lives in
+Runs on GitHub Actions every 3 hours. The list of games already seen lives in
 seen.json, which the workflow commits back to the repo after each run.
 """
 
@@ -24,7 +24,7 @@ SEARCH_URL = (
 )
 TAGS_URL = "https://store.steampowered.com/tagdata/populartags/english"
 DETAILS_URL = "https://store.steampowered.com/api/appdetails?appids={appid}&filters=basic"
-PAGES = 2  # 2 x 50 = the 100 newest items, plenty for a 30-minute window
+PAGES = 2  # 2 x 50 = the 100 newest items; Steam gets ~50-70 demos a day, ~8 per 3 hours
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen.json")
 MAX_SEEN = 3000  # keep the state file small; old items never come back to the top
 MAX_TAGS = 7  # the search row carries the top tags, same ones the store shows
@@ -87,17 +87,21 @@ def fetch_games():
     return games
 
 
-def header_image(game):
-    """Big store header image (460x215). Falls back to the small search capsule."""
+def fetch_details(game):
+    """Return (type, header image) from the store API, e.g. ("demo", "https://.../header.jpg").
+
+    The type is None when Steam doesn't answer; the image falls back to the small
+    search capsule.
+    """
     if game["id"].startswith("App_"):
         appid = game["id"][4:]
         try:
             data = get_json(DETAILS_URL.format(appid=appid))[appid]
             if data.get("success"):
-                return data["data"]["header_image"]
+                return data["data"].get("type"), data["data"].get("header_image") or game["img"]
         except Exception as e:
-            print(f"No header image for {game['title']}: {e}")
-    return game["img"]
+            print(f"No details for {game['title']}: {e}")
+    return None, game["img"]
 
 
 def load_seen():
@@ -136,9 +140,8 @@ def telegram(method, params):
         return False
 
 
-def send_game(game, dry_run):
+def send_game(game, photo, dry_run):
     caption = build_caption(game)
-    photo = header_image(game)
     if dry_run:
         print(photo)
         print(caption + "\n")
@@ -156,7 +159,7 @@ def main():
 
     # Manual test from the "Run workflow" button: send the newest game, touch nothing.
     if os.environ.get("SEND_LATEST") == "true":
-        send_game(games[0], dry_run)
+        send_game(games[0], fetch_details(games[0])[1], dry_run)
         return
 
     seen = load_seen()
@@ -179,7 +182,12 @@ def main():
 
     # Oldest first, so the newest ends up at the bottom of the chat.
     for game in reversed(new_games):
-        send_game(game, dry_run)
+        kind, photo = fetch_details(game)
+        # Only demos. If Steam didn't say what it is, send it anyway rather than lose it.
+        if kind and kind != "demo":
+            print(f"Skipping {game['title']} ({kind})")
+            continue
+        send_game(game, photo, dry_run)
 
     if new_games:
         # Save only after the messages went out, so a Telegram failure retries next run.
